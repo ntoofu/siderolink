@@ -26,6 +26,7 @@ import (
 	"golang.zx2c4.com/wireguard/conn"
 	"golang.zx2c4.com/wireguard/device"
 	wgtun "golang.zx2c4.com/wireguard/tun"
+	"golang.zx2c4.com/wireguard/tun/netstack"
 	"golang.zx2c4.com/wireguard/wgctrl"
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 
@@ -68,6 +69,8 @@ type Device struct {
 	ifaceName string
 	// tun is the underlying userspace wireguard tun device. Its value is nil if native wireguard is used.
 	tun wgtun.Device
+	// net is the optional netstack instance when running in pure userspace mode.
+	net *netstack.Net
 
 	clientMu sync.Mutex
 	client   *wgctrl.Client
@@ -94,6 +97,8 @@ type DeviceConfig struct {
 	// ForceUserspace forces the use of userspace wireguard implementation.
 	// If Bind or InputPacketFilters is set this field is always true.
 	ForceUserspace bool
+	// UseNetstack toggles a pure userspace Wireguard stack that doesn't require a host TUN device.
+	UseNetstack bool
 }
 
 // PeerHandler is an interface for handling peer events.
@@ -104,7 +109,7 @@ type PeerHandler interface {
 
 // NewDevice creates a new device with settings.
 func NewDevice(config DeviceConfig) (*Device, error) {
-	config.ForceUserspace = config.ForceUserspace || config.Bind != nil || config.InputPacketFilters != nil
+	config.ForceUserspace = config.ForceUserspace || config.Bind != nil || config.InputPacketFilters != nil || config.UseNetstack
 
 	client, err := wgctrl.New()
 	if err != nil {
@@ -135,6 +140,29 @@ func NewDevice(config DeviceConfig) (*Device, error) {
 	}
 
 	config.Logger.Info("attempting to configure tun device (userspace)", zap.Stringer("serverPrefix", config.ServerPrefix))
+
+	if config.UseNetstack {
+		config.Logger.Info("using embedded netstack for wireguard device", zap.Stringer("serverPrefix", config.ServerPrefix))
+
+		createdTun, netTun, err := netstack.CreateNetTUN([]netip.Addr{config.ServerPrefix.Addr()}, nil, LinkMTU)
+		if err != nil {
+			return nil, fmt.Errorf("error creating netstack wireguard device: %w", err)
+		}
+
+		ifaceName := InterfaceName
+
+		if name, nameErr := createdTun.Name(); nameErr == nil {
+			ifaceName = name
+		}
+
+		return &Device{
+			dc:        config,
+			ifaceName: ifaceName,
+			tun:       createdTun,
+			net:       netTun,
+			client:    client,
+		}, nil
+	}
 
 	createdTun, err := tun.CreateTUN(InterfaceName, LinkMTU, config.InputPacketFilters...)
 	if err != nil {
@@ -235,16 +263,28 @@ func (dev *Device) Run(ctx context.Context, logger *zap.Logger, peers PeerSource
 		return fmt.Errorf("error configuring Wireguard private key: %w", err)
 	}
 
-	iface, err := net.InterfaceByName(dev.ifaceName)
-	if err != nil {
-		return fmt.Errorf("error finding interface: %w", err)
+	mode := "native"
+
+	if dev.tun != nil {
+		mode = "userspace-tun"
 	}
 
-	if err = LinkUp(iface); err != nil {
-		return fmt.Errorf("error bringing link up: %w", err)
+	if dev.net != nil {
+		mode = "netstack"
 	}
 
-	logger.Info("wireguard device set up", zap.String("interface", dev.ifaceName), zap.Stringer("server_prefix", dev.dc.ServerPrefix))
+	if dev.net == nil {
+		iface, err := net.InterfaceByName(dev.ifaceName)
+		if err != nil {
+			return fmt.Errorf("error finding interface: %w", err)
+		}
+
+		if err = LinkUp(iface); err != nil {
+			return fmt.Errorf("error bringing link up: %w", err)
+		}
+	}
+
+	logger.Info("wireguard device set up", zap.String("interface", dev.ifaceName), zap.Stringer("server_prefix", dev.dc.ServerPrefix), zap.String("mode", mode))
 
 	var tunDeviceWait chan struct{}
 
@@ -295,6 +335,11 @@ func DeviceLogger(logger *zap.Logger) *device.Logger {
 		Verbosef: verboseFn,
 		Errorf:   logger.Sugar().Warnf,
 	}
+}
+
+// Netstack exposes the underlying netstack instance when running without a host TUN device.
+func (dev *Device) Netstack() *netstack.Net {
+	return dev.net
 }
 
 func timeAfter(interval time.Duration) <-chan time.Time {
