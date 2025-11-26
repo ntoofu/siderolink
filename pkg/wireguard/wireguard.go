@@ -312,11 +312,11 @@ func (dev *Device) Run(ctx context.Context, logger *zap.Logger, peers PeerSource
 		case <-tunDeviceWait:
 			return nil
 		case <-timeAfter(dev.dc.AutoPeerRemoveInterval):
-			if err = dev.cleanupPeers(logger); err != nil {
+			if err := dev.cleanupPeers(logger); err != nil {
 				return err
 			}
 		case events := <-eventsCh:
-			if err = handlePeerEvent(events); err != nil {
+			if err := handlePeerEvent(events); err != nil {
 				return err
 			}
 		}
