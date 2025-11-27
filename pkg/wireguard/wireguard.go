@@ -237,6 +237,9 @@ func (dev *Device) Run(ctx context.Context, logger *zap.Logger, peers PeerSource
 
 		defer func() {
 			if err := uapi.Close(); err != nil {
+				if errors.Is(err, net.ErrClosed) || errors.Is(err, os.ErrClosed) {
+					return  // already closed. This can happen when using netstack.
+				}
 				fmt.Println("error closing uapi socket: %w", err)
 			}
 		}()
