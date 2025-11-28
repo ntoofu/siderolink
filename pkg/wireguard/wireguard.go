@@ -310,8 +310,8 @@ func (dev *Device) Run(ctx context.Context, logger *zap.Logger, peers PeerSource
 		select {
 		case <-ctx.Done():
 			return nil
-		case <-errs:
-			return nil
+		case err := <-errs:
+			return err
 		case <-tunDeviceWait:
 			return nil
 		case <-timeAfter(dev.dc.AutoPeerRemoveInterval):
